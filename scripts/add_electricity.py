@@ -1343,4 +1343,16 @@ if __name__ == "__main__":
         sanitize_locations(n)
 
     n.meta = dict(snakemake.config, **dict(wildcards=dict(snakemake.wildcards)))
+
+    # Replace pd.NA with np.nan for netcdf export compatibility
+    for c in n.components:
+        # static table
+        if isinstance(c.static, pd.DataFrame):
+            c.static.replace({pd.NA: np.nan}, inplace=True)
+
+        # time-dependent tables
+        for k, df in c.dynamic.items():
+            if isinstance(df, pd.DataFrame):
+                c.dynamic[k] = df.replace({pd.NA: np.nan})
+
     n.export_to_netcdf(snakemake.output[0])

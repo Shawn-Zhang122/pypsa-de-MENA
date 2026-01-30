@@ -98,6 +98,7 @@ def add_existing_renewables(
     tech_map = {"solar": "PV", "onwind": "Onshore", "offwind-ac": "Offshore"}
 
     irena = pm.data.IRENASTAT().powerplant.convert_country_to_alpha2()
+    #irena = irena.set_index("Country")
     irena = irena.query("Country in @countries")
     irena = irena.groupby(["Technology", "Country", "Year"]).Capacity.sum()
 
@@ -115,12 +116,47 @@ def add_existing_renewables(
 
         # calculate yearly differences
         df.insert(loc=0, value=0.0, column="1999")
+        #print(f"[DEBUG] carrier={carrier}")
+        #print("[DEBUG] df.index (countries):", df.index.tolist())
+        #print("[DEBUG] df.columns (years):", df.columns.tolist())
+        #print("[DEBUG] df nonzero rows:", (df.sum(axis=1) > 0).sum())
+
         df = df.diff(axis=1).drop("1999", axis=1).clip(lower=0)
 
         # distribute capacities among generators potential (p_nom_max)
         gen_i = n.generators.query("carrier == @carrier").index
         carrier_gens = n.generators.loc[gen_i]
+
+        carrier_gens = carrier_gens[
+        carrier_gens.carrier.isin(costs.index)
+            ]
+        if carrier_gens.empty:
+             continue
+
+
+        print("[DEBUG] mapped countries:")
+        print(carrier_gens.bus.map(n.buses.country))
+
         res_capacities = []
+
+        for carrier, gens in n.generators.groupby("carrier"):
+            mapped_country = gens.bus.map(n.buses.country)
+
+            print(f"\nCarrier: {carrier}")
+            print(f"  # generators: {len(gens)}")
+            print(f"  # mapped countries: {mapped_country.notna().sum()}")
+
+            if mapped_country.notna().sum() == 0:
+                print("  ❌ NO buses map to countries")
+                print("  Sample buses:", gens.bus.unique()[:5])
+                continue
+
+            s = gens.groupby(mapped_country).p_nom_max.sum()
+            if (s > 0).sum() == 0:
+                print("  ❌ p_nom_max sums to zero everywhere")
+            else:
+                print("  ✅ OK")
+
         for country, group in carrier_gens.groupby(
             carrier_gens.bus.map(n.buses.country)
         ):
@@ -139,6 +175,11 @@ def add_existing_renewables(
                     df_agg.at[name, "Fueltype"] = carrier
                     df_agg.at[name, "Capacity"] = capacity
                     df_agg.at[name, "DateIn"] = year
+                    
+                    # ---- minimal safe fix here ----
+                    if cost_key not in costs.index:
+                        continue
+
                     df_agg.at[name, "lifetime"] = costs.at[cost_key, "lifetime"]
                     df_agg.at[name, "DateOut"] = (
                         year + costs.at[cost_key, "lifetime"] - 1
@@ -146,8 +187,8 @@ def add_existing_renewables(
                     df_agg.at[name, "bus"] = bus
                     df_agg.at[name, "resource_class"] = bin_id
 
-    df_agg["resource_class"] = df_agg["resource_class"].fillna(0)
-
+    #df_agg["resource_class"] = df_agg["resource_class"].fillna(0)
+    df_agg["resource_class"] = df_agg.get("resource_class", 0)
 
 def add_power_capacities_installed_before_baseyear(
     n: pypsa.Network,

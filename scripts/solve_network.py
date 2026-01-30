@@ -35,9 +35,11 @@ import sys
 from functools import partial
 from typing import Any
 
+
 import linopy
 import numpy as np
 import pandas as pd
+pd.options.mode.string_storage = "python"
 import pypsa
 import xarray as xr
 import yaml
@@ -1425,6 +1427,7 @@ if __name__ == "__main__":
         co2_sequestration_potential=snakemake.params["co2_sequestration_potential"],
         limit_max_growth=snakemake.params.get("sector", {}).get("limit_max_growth"),
     )
+
 
     logging_frequency = snakemake.config.get("solving", {}).get(
         "mem_logging_frequency", 30

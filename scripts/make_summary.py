@@ -11,6 +11,11 @@ import logging
 import pandas as pd
 import pypsa
 
+try:
+    pd.set_option("future.infer_string", False)
+except Exception:
+    pass
+
 from scripts._helpers import configure_logging, set_scenario_config
 
 pd.set_option("future.no_silent_downcasting", True)

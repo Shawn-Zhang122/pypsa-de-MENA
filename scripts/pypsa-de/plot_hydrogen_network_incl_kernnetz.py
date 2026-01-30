@@ -28,7 +28,7 @@ from scripts._helpers import (
     update_config_from_wildcards,
 )
 from scripts.make_summary import assign_locations
-from scripts.plot_power_network import load_projection
+from scripts.plot_power_network_Original import load_projection
 
 logger = logging.getLogger(__name__)
 

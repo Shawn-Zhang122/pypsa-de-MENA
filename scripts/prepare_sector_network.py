@@ -1420,15 +1420,21 @@ def add_co2limit(n, options, co2_totals_file, countries, nyears, limit):
     )
 
 
+# def cycling_shift(df, steps=1):
+#     """
+#     Cyclic shift on index of pd.Series|pd.DataFrame by number of steps.
+#     """
+#     df = df.copy()
+#     new_index = np.roll(df.index, steps)
+#     df.values[:] = df.reindex(index=new_index).values
+#     return df
+
 def cycling_shift(df, steps=1):
     """
     Cyclic shift on index of pd.Series|pd.DataFrame by number of steps.
     """
-    df = df.copy()
     new_index = np.roll(df.index, steps)
-    df.values[:] = df.reindex(index=new_index).values
-    return df
-
+    return df.reindex(index=new_index).copy()
 
 def add_generation(
     n: pypsa.Network,
@@ -6782,5 +6788,21 @@ if __name__ == "__main__":
 
     sanitize_carriers(n, snakemake.config)
     sanitize_locations(n)
+
+    for c in n.components:
+        # normalize carrier
+        if "carrier" in c.static.columns:
+            c.static["carrier"] = (
+                c.static["carrier"]
+                .replace({"": "unknown", "none": "unknown"})
+                .fillna("unknown")
+            )
+
+        # sanitize static tables
+        c.static.replace({pd.NA: np.nan}, inplace=True)
+
+        # sanitize dynamic tables
+        for k, df in c.dynamic.items():
+            c.dynamic[k] = df.replace({pd.NA: np.nan})
 
     n.export_to_netcdf(snakemake.output[0])

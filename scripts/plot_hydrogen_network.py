@@ -1,15 +1,21 @@
+# plot_hydrogen_network.py
 # SPDX-FileCopyrightText: Contributors to PyPSA-Eur <https://github.com/pypsa/pypsa-eur>
 #
 # SPDX-License-Identifier: MIT
 """
 Creates map of optimised hydrogen network, storage and selected other
 infrastructure.
+
+Patch (plot-only; no .nc changes):
+- pandas>=2 safety: disable StringDtype inference
+- pass plain Python dicts / numpy arrays to n.plot to avoid StringDtype -> numpy.issubdtype crash
 """
 
 import logging
 
 import geopandas as gpd
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import pypsa
 from pypsa.plot import add_legend_circles, add_legend_lines, add_legend_patches
@@ -19,6 +25,13 @@ from scripts.make_summary import assign_locations
 from scripts.plot_power_network import load_projection
 
 logger = logging.getLogger(__name__)
+
+
+def _disable_pandas_string_inference() -> None:
+    try:
+        pd.set_option("future.infer_string", False)
+    except Exception:
+        pass
 
 
 def group_pipes(df, drop_direction=False):
@@ -46,9 +59,6 @@ def group_pipes(df, drop_direction=False):
 
 @retry
 def plot_h2_map(n, regions):
-    # if "H2 pipeline" not in n.links.carrier.unique():
-    #     return
-
     assign_locations(n)
 
     h2_storage = n.stores.query("carrier == 'H2 Store'")
@@ -79,6 +89,7 @@ def plot_h2_map(n, regions):
 
     # make a fake MultiIndex so that area is correct for legend
     bus_sizes.rename(index=lambda x: x.replace(" H2", ""), level=0, inplace=True)
+
     # drop all links which are not H2 pipelines
     n.links.drop(
         n.links.index[~n.links.carrier.str.contains("H2 pipeline")], inplace=True
@@ -88,7 +99,7 @@ def plot_h2_map(n, regions):
     h2_retro = n.links[n.links.carrier == "H2 pipeline retrofitted"]
 
     if snakemake.params.foresight == "myopic":
-        # sum capacitiy for pipelines from different investment periods
+        # sum capacity for pipelines from different investment periods
         h2_new = group_pipes(h2_new)
 
         if not h2_retro.empty:
@@ -123,7 +134,6 @@ def plot_h2_map(n, regions):
 
         to_concat = [h2_new, h2_retro_w_new, h2_retro_wo_new]
         h2_total = pd.concat(to_concat).p_nom_opt.groupby(level=0).sum()
-
     else:
         h2_total = h2_new.p_nom_opt
 
@@ -155,7 +165,13 @@ def plot_h2_map(n, regions):
     color_h2_pipe = "#b3f3f4"
     color_retrofit = "#499a9c"
 
+    # IMPORTANT: use plain dict (not pd.Series) to avoid pandas StringDtype issues
     bus_colors = {"H2 Electrolysis": "#ff29d9", "H2 Fuel Cell": "#805394"}
+
+    # Ensure widths are plain floats/ndarrays
+    bus_sizes = bus_sizes.astype(float)
+    link_widths_total = link_widths_total.astype(float)
+    link_widths_retro = link_widths_retro.astype(float)
 
     n.plot(
         geomap=True,
@@ -254,6 +270,8 @@ def plot_h2_map(n, regions):
 
 
 if __name__ == "__main__":
+    _disable_pandas_string_inference()
+
     if "snakemake" not in globals():
         from scripts._helpers import mock_snakemake
 

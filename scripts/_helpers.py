@@ -17,6 +17,10 @@ from typing import Callable, Union
 import atlite
 import fiona
 import pandas as pd
+try:
+    pd.set_option("future.infer_string", False)
+except Exception:
+    pass
 import pypsa
 import pytz
 import requests

@@ -1,12 +1,24 @@
+# plot_balance_map.py
 # SPDX-FileCopyrightText: Contributors to PyPSA-Eur <https://github.com/pypsa/pypsa-eur>
 #
 # SPDX-License-Identifier: MIT
 """
 Create energy balance maps for the defined carriers.
+
+Patch (plot-only; no .nc changes):
+1) Fix PyPSA statistics unit crash:
+   AttributeError: 'ArrowStringArray' object has no attribute 'item'
+   by overriding n.bus_carrier_unit(...) to return a safe scalar string.
+
+2) Fix PyPSA plotting crash:
+   TypeError: Cannot interpret '<StringDtype(...)>' as a data type
+   by disabling pandas StringDtype inference and ensuring colors passed into n.plot are
+   plain Python strings/dicts (not pandas StringDtype Series).
 """
 
 import geopandas as gpd
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 import pypsa
 from packaging.version import Version, parse
@@ -24,7 +36,81 @@ from scripts.plot_power_network import load_projection
 
 SEMICIRCLE_CORRECTION_FACTOR = 2 if parse(pypsa.__version__) <= Version("0.33.2") else 1
 
+
+def _disable_pandas_string_inference() -> None:
+    try:
+        pd.set_option("future.infer_string", False)
+    except Exception:
+        pass
+
+
+def _safe_unit_scalar(x, default="MWh") -> str:
+    """
+    Accept scalars / pandas arrays / ArrowStringArray and return a scalar unit string.
+    Preference: first non-empty string, else default.
+    """
+    if x is None:
+        return default
+
+    # pandas/arrow arrays or list-like
+    if hasattr(x, "to_list"):
+        try:
+            vals = x.to_list()
+        except Exception:
+            vals = list(x)
+        for v in vals:
+            if v is None:
+                continue
+            s = str(v).strip()
+            if s != "" and s.lower() != "nan":
+                return s
+        return default
+
+    s = str(x).strip()
+    return default if s == "" or s.lower() == "nan" else s
+
+
+def _patch_bus_carrier_unit(n: pypsa.Network, default="MWh") -> None:
+    """
+    Override n.bus_carrier_unit(bus_carrier) to avoid ArrowStringArray.item() crash.
+    """
+    import types
+
+    def _bus_carrier_unit(self, bus_carrier):
+        # best-effort: read from carriers['unit'] if present
+        if hasattr(self, "carriers") and "unit" in self.carriers.columns:
+            if bus_carrier in self.carriers.index:
+                u = self.carriers.loc[bus_carrier, "unit"]
+                return _safe_unit_scalar(u, default=default)
+        return default
+
+    n.bus_carrier_unit = types.MethodType(_bus_carrier_unit, n)
+
+
+def _ensure_carrier_columns_safe(n: pypsa.Network) -> None:
+    # colors: keep plain python strings
+    if "color" in n.carriers.columns:
+        n.carriers["color"] = (
+            n.carriers["color"]
+            .astype(object)
+            .replace(r"^\s*$", np.nan, regex=True)
+            .fillna("lightgrey")
+        )
+    # units: pick first non-empty per carrier (handles duplicated/mixed units)
+    if "unit" in n.carriers.columns:
+        # convert to object to avoid ArrowStringArray propagation
+        n.carriers["unit"] = (
+            n.carriers["unit"]
+            .astype(object)
+            .replace(r"^\s*$", np.nan, regex=True)
+            .fillna(np.nan)
+        )
+        # if duplicates happen, keep as-is but safe scalar extraction is handled by _patch_bus_carrier_unit
+
+
 if __name__ == "__main__":
+    _disable_pandas_string_inference()
+
     if "snakemake" not in globals():
         from scripts._helpers import mock_snakemake
 
@@ -42,7 +128,14 @@ if __name__ == "__main__":
     update_config_from_wildcards(snakemake.config, snakemake.wildcards)
 
     n = pypsa.Network(snakemake.input.network)
+
+    # keep original sanitisation
     sanitize_carriers(n, snakemake.config)
+
+    # ---- hard fixes (plot-only) ----
+    _ensure_carrier_columns_safe(n)
+    _patch_bus_carrier_unit(n, default="MWh")
+
     pypsa.options.params.statistics.round = 3
     pypsa.options.params.statistics.drop_zero = True
     pypsa.options.params.statistics.nice_names = False
@@ -51,13 +144,15 @@ if __name__ == "__main__":
     config = snakemake.params.plotting
     carrier = snakemake.wildcards.carrier
 
-    # fill empty colors or "" with light grey
-    mask = n.carriers.color.isna() | n.carriers.color.eq("")
-    n.carriers["color"] = n.carriers.color.mask(mask, "lightgrey")
+    # fill empty colors or "" with light grey (plain object dtype)
+    if "color" in n.carriers.columns:
+        mask = n.carriers.color.isna() | n.carriers.color.astype(object).eq("")
+        n.carriers["color"] = n.carriers.color.astype(object).mask(mask, "lightgrey")
 
     # set EU location with location from config
     eu_location = config["eu_node_location"]
-    n.buses.loc["EU", ["x", "y"]] = eu_location["x"], eu_location["y"]
+    if "EU" in n.buses.index:
+        n.buses.loc["EU", ["x", "y"]] = eu_location["x"], eu_location["y"]
 
     # get balance map plotting parameters
     boundaries = config["map"]["boundaries"]
@@ -72,7 +167,7 @@ if __name__ == "__main__":
     # for plotting change bus to location
     n.buses["location"] = n.buses["location"].replace("", "EU").fillna("EU")
 
-    # set location of buses to EU if location is empty and set x and y coordinates to bus location
+    # set x and y coordinates to bus location
     n.buses["x"] = n.buses.location.map(n.buses.x)
     n.buses["y"] = n.buses.location.map(n.buses.y)
 
@@ -91,19 +186,28 @@ if __name__ == "__main__":
 
     eb.loc[components] = eb.loc[components].drop(index=carriers_in_eb, level="carrier")
     eb = eb.dropna()
+
     bus_sizes = eb.groupby(level=["bus", "carrier"]).sum().div(conversion)
     bus_sizes = bus_sizes.sort_values(ascending=False)
 
     # Get colors for carriers
-    n.carriers.update({"color": snakemake.params.plotting["tech_colors"]})
-    carrier_colors = n.carriers.color.copy().replace("", "grey")
+    # n.carriers.update({"color": ...}) can introduce dtype issues; keep plain object strings:
+    tech_colors = snakemake.params.plotting.get("tech_colors", {})
+    if isinstance(tech_colors, dict) and len(tech_colors) > 0 and "color" in n.carriers.columns:
+        for k, v in tech_colors.items():
+            if k in n.carriers.index:
+                n.carriers.at[k, "color"] = str(v)
 
-    colors = (
-        bus_sizes.index.get_level_values("carrier")
-        .unique()
-        .to_series()
-        .map(carrier_colors)
-    )
+    carrier_colors_map = {}
+    if "color" in n.carriers.columns:
+        for c in n.carriers.index:
+            carrier_colors_map[str(c)] = str(n.carriers.at[c, "color"]) if n.carriers.at[c, "color"] else "lightgrey"
+    carrier_colors_map.setdefault("", "lightgrey")
+    carrier_colors_map.setdefault("unknown", "lightgrey")
+
+    # IMPORTANT: pass a plain dict {carrier: color} (not pandas Series with StringDtype)
+    unique_carriers = list(map(str, bus_sizes.index.get_level_values("carrier").unique()))
+    colors = {c: carrier_colors_map.get(c, "lightgrey") for c in unique_carriers}
 
     # line and links widths according to optimal capacity
     flow = n.statistics.transmission(groupby=False, bus_carrier=carrier).div(conversion)
@@ -115,8 +219,8 @@ if __name__ == "__main__":
         )
         flow = flow[~flow_reversed_mask].subtract(flow_reversed, fill_value=0)
 
-    # if there are not lines or links for the bus carrier, use fallback for plotting
-    fallback = pd.Series()
+    # if there are no lines or links for the bus carrier, use fallback for plotting
+    fallback = pd.Series(dtype=float)
     line_widths = flow.get("Line", fallback).abs()
     link_widths = flow.get("Link", fallback).abs()
 
@@ -164,7 +268,7 @@ if __name__ == "__main__":
 
     n.plot(
         bus_sizes=bus_sizes * bus_size_factor,
-        bus_colors=colors,
+        bus_colors=colors,  # dict: carrier -> color (safe)
         bus_split_circles=True,
         line_widths=line_widths * branch_width_factor,
         link_widths=link_widths * branch_width_factor,
@@ -175,7 +279,6 @@ if __name__ == "__main__":
         else None,
         ax=ax,
         margin=0.2,
-        color_geomap={"border": "darkgrey", "coastline": "darkgrey"},
         geomap=True,
         boundaries=boundaries,
     )
@@ -216,17 +319,16 @@ if __name__ == "__main__":
     }
 
     pad = 0.18
-    n.carriers.loc["", "color"] = "None"
 
     # Get lists for supply and consumption carriers
     pos_carriers = bus_sizes[bus_sizes > 0].index.unique("carrier")
     neg_carriers = bus_sizes[bus_sizes < 0].index.unique("carrier")
 
-    # Determine larger total absolute value for supply and consumption for a carrier if carrier exists as both supply and consumption
+    # Determine larger total absolute value for supply and consumption for a carrier
     common_carriers = pos_carriers.intersection(neg_carriers)
 
-    def get_total_abs(carrier, sign):
-        values = bus_sizes.loc[:, carrier]
+    def get_total_abs(_carrier, sign):
+        values = bus_sizes.loc[:, _carrier]
         return values[values * sign > 0].abs().sum()
 
     supp_carriers = sorted(
@@ -241,8 +343,8 @@ if __name__ == "__main__":
     # Add supply carriers
     add_legend_patches(
         ax,
-        n.carriers.color[supp_carriers],
-        supp_carriers,
+        [colors.get(str(c), "lightgrey") for c in supp_carriers],
+        [str(c) for c in supp_carriers],
         legend_kw={
             "bbox_to_anchor": (0, -pad),
             "ncol": 1,
@@ -254,8 +356,8 @@ if __name__ == "__main__":
     # Add consumption carriers
     add_legend_patches(
         ax,
-        n.carriers.color[cons_carriers],
-        cons_carriers,
+        [colors.get(str(c), "lightgrey") for c in cons_carriers],
+        [str(c) for c in cons_carriers],
         legend_kw={
             "bbox_to_anchor": (0.5, -pad),
             "ncol": 1,

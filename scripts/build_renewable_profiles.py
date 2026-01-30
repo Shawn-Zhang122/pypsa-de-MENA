@@ -152,6 +152,13 @@ if __name__ == "__main__":
     availability = xr.open_dataarray(snakemake.input.availability_matrix)
 
     regions = gpd.read_file(snakemake.input.distance_regions)
+
+    #by ZSW
+    # CRS used by raster masking
+    # --- REQUIRED GUARD (documented rasterio behavior) ---
+    #regions = regions[~regions.geometry.is_empty]
+    #regions = regions[regions.geometry.area > 0]
+
     # do not pull up, set_index does not work if geo dataframe is empty
     regions = regions.set_index("name").rename_axis("bus")
     if snakemake.wildcards.technology.startswith("offwind"):
